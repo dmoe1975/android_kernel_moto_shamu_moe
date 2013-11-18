@@ -32,6 +32,7 @@
 #include "squashfs_fs_sb.h"
 #include "squashfs.h"
 #include "decompressor.h"
+#include "page_actor.h"
 
 struct squashfs_xz {
 	struct xz_dec *state;
@@ -102,23 +103,20 @@ static void squashfs_xz_free(void *strm)
 	}
 }
 
-
-static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
-	struct buffer_head **bh, int b, int offset, int length, int srclength,
-	int pages)
+static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void *strm,
+	struct buffer_head **bh, int b, int offset, int length,
+	struct squashfs_page_actor *output)
 {
 	enum xz_ret xz_err;
-	int avail, total = 0, k = 0, page = 0;
-	struct squashfs_xz *stream = msblk->stream;
-
-	mutex_lock(&msblk->read_data_mutex);
+	int avail, total = 0, k = 0;
+	struct squashfs_xz *stream = strm;
 
 	xz_dec_reset(stream->state);
 	stream->buf.in_pos = 0;
 	stream->buf.in_size = 0;
 	stream->buf.out_pos = 0;
 	stream->buf.out_size = PAGE_CACHE_SIZE;
-	stream->buf.out = buffer[page++];
+	stream->buf.out = squashfs_first_page(output);
 
 	do {
 		if (stream->buf.in_pos == stream->buf.in_size && k < b) {
@@ -134,11 +132,12 @@ static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			offset = 0;
 		}
 
-		if (stream->buf.out_pos == stream->buf.out_size
-							&& page < pages) {
-			stream->buf.out = buffer[page++];
-			stream->buf.out_pos = 0;
-			total += PAGE_CACHE_SIZE;
+		if (stream->buf.out_pos == stream->buf.out_size) {
+			stream->buf.out = squashfs_next_page(output);
+			if (stream->buf.out != NULL) {
+				stream->buf.out_pos = 0;
+				total += PAGE_CACHE_SIZE;
+			}
 		}
 
 		xz_err = xz_dec_run(stream->state, &stream->buf);
@@ -147,19 +146,10 @@ static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			put_bh(bh[k++]);
 	} while (xz_err == XZ_OK);
 
-	if (xz_err != XZ_STREAM_END) {
-		ERROR("xz_dec_run error, data probably corrupt\n");
-		goto release_mutex;
-	}
+	squashfs_finish_page(output);
 
-	if (k < b) {
-		ERROR("xz_uncompress error, input remaining\n");
-		goto release_mutex;
-	}
-
-	total += stream->buf.out_pos;
-	mutex_unlock(&msblk->read_data_mutex);
-	return total;
+	if (xz_err != XZ_STREAM_END || k < b)
+		goto out;
 
 release_mutex:
 	mutex_unlock(&msblk->read_data_mutex);

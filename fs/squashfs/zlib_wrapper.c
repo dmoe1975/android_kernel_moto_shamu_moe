@@ -32,6 +32,7 @@
 #include "squashfs_fs_sb.h"
 #include "squashfs.h"
 #include "decompressor.h"
+#include "page_actor.h"
 
 static void *zlib_init(struct squashfs_sb_info *dummy, void *buff, int len)
 {
@@ -60,18 +61,15 @@ static void zlib_free(void *strm)
 	kfree(stream);
 }
 
-
-static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
-	struct buffer_head **bh, int b, int offset, int length, int srclength,
-	int pages)
+static int zlib_uncompress(struct squashfs_sb_info *msblk, void *strm,
+	struct buffer_head **bh, int b, int offset, int length,
+	struct squashfs_page_actor *output)
 {
-	int zlib_err, zlib_init = 0;
-	int k = 0, page = 0;
-	z_stream *stream = msblk->stream;
+	int zlib_err, zlib_init = 0, k = 0;
+	z_stream *stream = strm;
 
-	mutex_lock(&msblk->read_data_mutex);
-
-	stream->avail_out = 0;
+	stream->avail_out = PAGE_CACHE_SIZE;
+	stream->next_out = squashfs_first_page(output);
 	stream->avail_in = 0;
 
 	do {
@@ -87,18 +85,18 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			offset = 0;
 		}
 
-		if (stream->avail_out == 0 && page < pages) {
-			stream->next_out = buffer[page++];
-			stream->avail_out = PAGE_CACHE_SIZE;
+		if (stream->avail_out == 0) {
+			stream->next_out = squashfs_next_page(output);
+			if (stream->next_out != NULL)
+				stream->avail_out = PAGE_CACHE_SIZE;
 		}
 
 		if (!zlib_init) {
 			zlib_err = zlib_inflateInit(stream);
 			if (zlib_err != Z_OK) {
-				ERROR("zlib_inflateInit returned unexpected "
-					"result 0x%x, srclength %d\n",
-					zlib_err, srclength);
-				goto release_mutex;
+
+				squashfs_finish_page(output);
+				goto out;
 			}
 			zlib_init = 1;
 		}
@@ -109,10 +107,10 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			put_bh(bh[k++]);
 	} while (zlib_err == Z_OK);
 
-	if (zlib_err != Z_STREAM_END) {
-		ERROR("zlib_inflate error, data probably corrupt\n");
-		goto release_mutex;
-	}
+	squashfs_finish_page(output);
+
+	if (zlib_err != Z_STREAM_END)
+		goto out;
 
 	zlib_err = zlib_inflateEnd(stream);
 	if (zlib_err != Z_OK) {

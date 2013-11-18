@@ -30,6 +30,7 @@
 #include "squashfs_fs_sb.h"
 #include "decompressor.h"
 #include "squashfs.h"
+#include "page_actor.h"
 
 /*
  * This file (and decompressor.h) implements a decompressor framework for
@@ -86,7 +87,8 @@ const struct squashfs_decompressor *squashfs_lookup_decompressor(int id)
 void *squashfs_decompressor_init(struct super_block *sb, unsigned short flags)
 {
 	struct squashfs_sb_info *msblk = sb->s_fs_info;
-	void *strm, *buffer = NULL;
+	void *buffer = NULL, *comp_opts;
+	struct squashfs_page_actor *actor = NULL;
 	int length = 0;
 
 	/*
@@ -97,9 +99,14 @@ void *squashfs_decompressor_init(struct super_block *sb, unsigned short flags)
 		if (buffer == NULL)
 			return ERR_PTR(-ENOMEM);
 
-		length = squashfs_read_data(sb, &buffer,
-			sizeof(struct squashfs_super_block), 0, NULL,
-			PAGE_CACHE_SIZE, 1);
+		actor = squashfs_page_actor_init(&buffer, 1, 0);
+		if (actor == NULL) {
+			comp_opts = ERR_PTR(-ENOMEM);
+			goto out;
+		}
+
+		length = squashfs_read_data(sb,
+			sizeof(struct squashfs_super_block), 0, NULL, actor);
 
 		if (length < 0) {
 			strm = ERR_PTR(length);
@@ -109,7 +116,8 @@ void *squashfs_decompressor_init(struct super_block *sb, unsigned short flags)
 
 	strm = msblk->decompressor->init(msblk, buffer, length);
 
-finished:
+out:
+	kfree(actor);
 	kfree(buffer);
 
 	return strm;

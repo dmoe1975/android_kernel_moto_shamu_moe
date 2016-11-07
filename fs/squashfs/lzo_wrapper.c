@@ -78,59 +78,19 @@ static int lzo_uncompress(struct squashfs_sb_info *msblk, void *strm,
 	struct buffer_head **bh, int b, int offset, int length,
 	struct squashfs_page_actor *output)
 {
-	struct squashfs_lzo *stream = strm;
-	void *buff = stream->input, *data;
-	int avail, i, bytes = length, res;
+	int res;
 	size_t out_len = output->length;
+	struct squashfs_lzo *stream = strm;
 
-	mutex_lock(&msblk->read_data_mutex);
-
-	for (i = 0; i < b; i++) {
-		wait_on_buffer(bh[i]);
-		if (!buffer_uptodate(bh[i]))
-			goto block_release;
-
-		avail = min(bytes, msblk->devblksize - offset);
-		memcpy(buff, bh[i]->b_data + offset, avail);
-		buff += avail;
-		bytes -= avail;
-		offset = 0;
-		put_bh(bh[i]);
-	}
-
+	squashfs_bh_to_buf(bh, b, stream->input, offset, length,
+		msblk->devblksize);
 	res = lzo1x_decompress_safe(stream->input, (size_t)length,
 					stream->output, &out_len);
 	if (res != LZO_E_OK)
-		goto failed;
+		return -EIO;
+	squashfs_buf_to_actor(stream->output, output, out_len);
 
-	res = bytes = (int)out_len;
-	data = squashfs_first_page(output);
-	buff = stream->output;
-	while (data) {
-		if (bytes <= PAGE_CACHE_SIZE) {
-			memcpy(data, buff, bytes);
-			break;
-		} else {
-			memcpy(data, buff, PAGE_CACHE_SIZE);
-			buff += PAGE_CACHE_SIZE;
-			bytes -= PAGE_CACHE_SIZE;
-			data = squashfs_next_page(output);
-		}
-	}
-	squashfs_finish_page(output);
-
-	mutex_unlock(&msblk->read_data_mutex);
-	return res;
-
-block_release:
-	for (; i < b; i++)
-		put_bh(bh[i]);
-
-failed:
-	mutex_unlock(&msblk->read_data_mutex);
-
-	ERROR("lzo decompression failed, data probably corrupt\n");
-	return -EIO;
+	return out_len;
 }
 
 const struct squashfs_decompressor squashfs_lzo_comp_ops = {
